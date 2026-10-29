@@ -43,6 +43,12 @@ pub enum GameError {
     /// A Spotter has already moved this turn and may only spot from
     /// its new square.
     SpotFromOldSquare,
+    /// This team's Spotter already moved this turn; the turn may only be
+    /// ended with `spot` or `end_turn`, no further moves or attacks.
+    SpotPending,
+    /// There is no pending Spotter spot to resolve, so the turn cannot
+    /// be passed: only a Spotter team that just moved may `end_turn`.
+    NoSpotPending,
 }
 
 impl fmt::Display for GameError {
@@ -66,6 +72,18 @@ impl fmt::Display for GameError {
             }
             GameError::SpotFromOldSquare => {
                 write!(f, "a Spotter already moved this turn and may only spot from its new square")
+            }
+            GameError::SpotPending => {
+                write!(
+                    f,
+                    "the Spotter already moved this turn; end the turn with a spot or pass instead"
+                )
+            }
+            GameError::NoSpotPending => {
+                write!(
+                    f,
+                    "no Spotter spot is pending; the turn can only be ended by moving or attacking"
+                )
             }
         }
     }
@@ -189,6 +207,14 @@ impl Game {
         team: &Team,
     ) -> Result<MoveOutcome, GameError> {
         self.check_turn(team)?;
+        // Only one piece may move per turn. A Spotter that just moved
+        // with an enemy in front keeps the turn for its spot alone, so
+        // no further move or attack is legal on this turn.
+        if let Some((spot_team, _)) = self.spot_after_move {
+            if spot_team == *team {
+                return Err(GameError::SpotPending);
+            }
+        }
         let piece = self
             .board
             .piece_of(from.x, from.y, team)
@@ -280,6 +306,30 @@ impl Game {
             self.revealed.insert(from);
             self.finish_or_swap(*team, false);
         }
+        Ok(())
+    }
+
+    /// End a turn after a Spotter moved with an enemy in front, without
+    /// spotting.
+    ///
+    /// The rules make the follow-up spot optional ("Spotters may move,
+    /// then use their special attack"), so instead of forcing a spot
+    /// after such a move the team may simply end its turn: the Spotter
+    /// keeps the square it moved to, is not revealed, and nothing is
+    /// captured.
+    ///
+    /// Returns [GameError::NoSpotPending] when no Spotter spot is
+    /// waiting for this team — ordinary turns always end by moving or
+    /// attacking, so passing is only meaningful right after a Spotter
+    /// move.
+    pub fn end_turn(&mut self, team: &Team) -> Result<(), GameError> {
+        self.check_turn(team)?;
+        let (spot_team, _) = self
+            .spot_after_move
+            .filter(|(t, _)| t == team)
+            .ok_or(GameError::NoSpotPending)?;
+        self.spot_after_move = None;
+        self.finish_or_swap(spot_team, false);
         Ok(())
     }
 
@@ -463,20 +513,21 @@ mod tests {
     fn scout_reveals_on_long_moves_only() {
         let mut game = empty_game();
         let b = game.board_mut();
-        b.place_test_piece(2, 5, PieceName::Scout, &RED);
-        b.place_test_piece(3, 3, PieceName::Scout, &BLUE);
+        // Column 0 is clear of craters, so the long slide stays open.
+        b.place_test_piece(0, 5, PieceName::Scout, &RED);
+        b.place_test_piece(9, 5, PieceName::Scout, &BLUE);
 
-        game.move_piece(Pos::new(2, 5), Pos::new(2, 1), &RED)
+        game.move_piece(Pos::new(0, 5), Pos::new(0, 1), &RED)
             .expect("long straight-line move");
         assert!(
-            game.revealed(Pos::new(2, 1)),
+            game.revealed(Pos::new(0, 1)),
             "the long move reveals the Scout"
         );
 
-        game.move_piece(Pos::new(3, 3), Pos::new(3, 2), &BLUE)
+        game.move_piece(Pos::new(9, 5), Pos::new(9, 4), &BLUE)
             .expect("blue single-square move");
         assert!(
-            !game.revealed(Pos::new(3, 2)),
+            !game.revealed(Pos::new(9, 4)),
             "a one-square move keeps the Scout hidden"
         );
     }
@@ -680,6 +731,84 @@ mod tests {
         );
     }
 
+    /// After a Spotter moves with an enemy in front, the team's turn may
+    /// only end with a spot or an explicit pass: any second move (by any
+    /// piece) is rejected, and `end_turn` passes without revealing or
+    /// capturing.
+    #[test]
+    fn spotting_is_optional_and_a_second_move_is_rejected() {
+        let mut game = empty_game();
+        let b = game.board_mut();
+        b.place_test_piece(1, 6, PieceName::Spy, &RED);
+        b.place_test_piece(2, 6, PieceName::Spy, &RED);
+        b.place_test_piece(5, 3, PieceName::Spotter, &BLUE); // faces +y
+        b.place_test_piece(4, 4, PieceName::Scout, &RED); // new front square
+        b.place_test_piece(8, 2, PieceName::Spotter, &BLUE); // unmoved twin
+        b.place_test_piece(8, 3, PieceName::Spy, &RED); // in front of the twin
+
+        game.move_piece(Pos::new(1, 6), Pos::new(0, 6), &RED)
+            .expect("red spy steps");
+        game.move_piece(Pos::new(5, 3), Pos::new(4, 3), &BLUE)
+            .expect("spotter sidestep");
+        assert_eq!(game.turn(), Some(BLUE), "the turn stays with blue");
+
+        // A second move by any blue piece - even one with its own spot
+        // available - must wait for the spot decision.
+        assert_eq!(
+            game.move_piece(Pos::new(8, 2), Pos::new(9, 2), &BLUE),
+            Err(GameError::SpotPending),
+            "the twin Spotter cannot move before the moved one spots or passes"
+        );
+        assert_eq!(
+            game.board().piece_at(8, 2),
+            Some(PieceName::Spotter),
+            "the rejected move does not disturb the board"
+        );
+
+        // Passing ends the turn: no spot, no reveal, no capture.
+        game.end_turn(&BLUE).expect("pass the optional spot");
+        assert_eq!(
+            game.turn(),
+            Some(RED),
+            "the pass hands the turn to red"
+        );
+        assert_eq!(
+            game.board().piece_at(4, 3),
+            Some(PieceName::Spotter),
+            "the Spotter stays on its new square"
+        );
+        assert!(
+            !game.revealed(Pos::new(4, 3)),
+            "passing does not reveal the Spotter"
+        );
+        assert_eq!(
+            game.board().piece_at(4, 4),
+            Some(PieceName::Scout),
+            "passing captures nothing"
+        );
+
+        // Once the pending spot is cleared, `end_turn` is refused again.
+        assert_eq!(
+            game.end_turn(&RED),
+            Err(GameError::NoSpotPending)
+        );
+    }
+
+    /// `end_turn` is only legal while one of the team's Spotters is
+    /// waiting to spot; otherwise it is refused.
+    #[test]
+    fn end_turn_is_rejected_without_a_pending_spot() {
+        let mut game = empty_game();
+        assert_eq!(
+            game.end_turn(&RED),
+            Err(GameError::NoSpotPending)
+        );
+        assert_eq!(
+            game.end_turn(&BLUE),
+            Err(GameError::NotYourTurn)
+        );
+    }
+
     /// A wrong guess captures nothing, reveals the Spotter, and still
     /// consumes the turn. Blue faces +y, so the target stands on the
     /// square in front of the Spotter.
@@ -761,18 +890,19 @@ mod tests {
         // Blue: one mobile scout. No flags, so nothing can ever be
         // captured and no stalemate can interfere before the block.
         b.place_test_piece(5, 5, PieceName::Spy, &RED);
-        b.place_test_piece(6, 3, PieceName::Scout, &BLUE);
+        // Row 6 is clear of craters, so the sidestep path is open.
+        b.place_test_piece(6, 6, PieceName::Scout, &BLUE);
 
         let a = Pos::new(5, 5);
 
         // turn 1 (red): spy (5,5) -> (6,5).
         game.move_piece(a, Pos::new(6, 5), &RED).expect("first swap");
         // turn 2 (blue): scout sidesteps, interleaving.
-        game.move_piece(Pos::new(6, 3), Pos::new(7, 3), &BLUE)
+        game.move_piece(Pos::new(6, 6), Pos::new(7, 6), &BLUE)
             .expect("blue's move interleaves");
         // red's spy can go back and forth only: (6,5) -> (5,5).
         game.move_piece(Pos::new(6, 5), a, &RED).expect("second swap");
-        game.move_piece(Pos::new(7, 3), Pos::new(8, 3), &BLUE)
+        game.move_piece(Pos::new(7, 6), Pos::new(8, 6), &BLUE)
             .expect("blue again");
         // Third dance within three of red's own turns: blocked.
         assert_eq!(
@@ -793,11 +923,12 @@ mod tests {
         b.place_test_piece(4, 5, PieceName::Spy, &RED);
         b.place_test_piece(3, 7, PieceName::Flag, &RED);
         b.place_test_piece(4, 4, PieceName::Flag, &BLUE);
-        b.place_test_piece(3, 1, PieceName::Scout, &BLUE);
+        // Column 5 is clear of craters, so the scout can sidestep freely.
+        b.place_test_piece(5, 1, PieceName::Scout, &BLUE);
 
         game.move_piece(Pos::new(4, 5), Pos::new(4, 6), &RED)
             .expect("spy backs off");
-        game.move_piece(Pos::new(3, 1), Pos::new(3, 2), &BLUE)
+        game.move_piece(Pos::new(5, 1), Pos::new(5, 2), &BLUE)
             .expect("blue scout steps");
         game.move_piece(Pos::new(4, 6), Pos::new(4, 5), &RED)
             .expect("spy returns to the original square");
@@ -805,8 +936,8 @@ mod tests {
 
         // The flag is at (4,4): one more blue move, then red steps
         // onto it.
-        game.move_piece(Pos::new(3, 2), Pos::new(3, 3), &BLUE)
-            .expect("blue scout steps on the flag's line");
+        game.move_piece(Pos::new(5, 2), Pos::new(5, 3), &BLUE)
+            .expect("blue scout sidesteps");
         let out = game
             .move_piece(Pos::new(4, 5), Pos::new(4, 4), &RED)
             .expect("spy steps onto the flag");

@@ -7,7 +7,8 @@ use crate::piece::{BoardPiece, FightResult, PieceName, resolve_fight};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TilesType{
-    // Craters block movement; they are placed by gameplay code and tests.
+    // Craters block movement; a fresh board carries the two default
+    // patches in its middle rows (see `Board::new`).
     #[allow(dead_code)]
     Crater,
     Empty,
@@ -83,7 +84,7 @@ impl Board {
     pub fn new() -> Board {
         let dim_x: usize = 10;
         let dim_y: usize = 8;
-        Board {
+        let mut board = Board {
             dim_x,
             dim_y,
             tiles: Array2::from_shape_fn((dim_x, dim_y), |_| Tile {
@@ -91,7 +92,15 @@ impl Board {
                 tile_type: TilesType::Empty,
                 owned_team: TilePieceOwnership::None
             }),
+        };
+        // The two crater patches, one in each half of the middle rows.
+        for (x, y) in [
+            (2, 3), (3, 3), (2, 4), (3, 4),
+            (6, 3), (7, 3), (6, 4), (7, 4),
+        ] {
+            board.tiles[[x, y]].tile_type = TilesType::Crater;
         }
+        board
     }
     pub fn initialize(&mut self, team_blue: &Team, team_red: &Team) {
         const COMPOSITION: &[(PieceName, usize)] = &[
@@ -470,10 +479,6 @@ fn board_with_piece_at(x: usize, y: usize, id: PieceName, team: &Team) -> Board 
         tile.owned_team = team.ownership();
     }
 
-    fn set_crater(b: &mut Board, x: usize, y: usize) {
-        b.tiles[[x, y]].tile_type = TilesType::Crater;
-    }
-
     fn assert_occupied(b: &Board, x: usize, y: usize, id: PieceName, team: &Team) {
         let tile = &b.tiles[[x, y]];
         assert_eq!(tile.piece.as_ref().map(|p| p.id), Some(id));
@@ -490,11 +495,13 @@ fn board_with_piece_at(x: usize, y: usize, id: PieceName, team: &Team) -> Board 
 
     #[test]
     fn normal_piece_moves_one_step_in_each_direction() {
-        for (dx, dy) in [(3, 3), (5, 3), (4, 2), (4, 4)] {
-            let mut b = board_with_piece_at(4, 3, PieceName::Captain, &blue());
-            assert_eq!(b.move_piece(4, 3, dx, dy, &blue()), Ok(MoveOutcome::Moved));
+        // (4,5) sits clear of the default craters, so all four
+        // neighbouring squares are ordinary land.
+        for (dx, dy) in [(3, 5), (5, 5), (4, 4), (4, 6)] {
+            let mut b = board_with_piece_at(4, 5, PieceName::Captain, &blue());
+            assert_eq!(b.move_piece(4, 5, dx, dy, &blue()), Ok(MoveOutcome::Moved));
             assert_occupied(&b, dx, dy, PieceName::Captain, &blue());
-            assert_empty(&b, 4, 3);
+            assert_empty(&b, 4, 5);
         }
     }
 
@@ -537,10 +544,12 @@ fn board_with_piece_at(x: usize, y: usize, id: PieceName, team: &Team) -> Board 
 
     #[test]
     fn scout_moves_multiple_tiles_along_axis() {
-        for (dx, dy) in [(9, 3), (0, 3), (4, 7), (4, 0), (7, 3)] {
-            let mut b = board_with_piece_at(4, 3, PieceName::Scout, &blue());
+        // Row 5 and column 4 contain no default craters, so every
+        // target in this list sits on reachable open terrain.
+        for (dx, dy) in [(9, 5), (0, 5), (4, 7), (4, 0), (7, 5)] {
+            let mut b = board_with_piece_at(4, 5, PieceName::Scout, &blue());
             assert_eq!(
-                b.move_piece(4, 3, dx, dy, &blue()),
+                b.move_piece(4, 5, dx, dy, &blue()),
                 Ok(MoveOutcome::Moved),
                 "scout should reach ({}, {})",
                 dx,
@@ -620,24 +629,101 @@ fn board_with_piece_at(x: usize, y: usize, id: PieceName, team: &Team) -> Board 
     }
 
     #[test]
-    fn moving_onto_a_crater_is_blocked() {
-        for (dx, dy) in [(5, 3), (4, 2)] {
-            let mut b = board_with_piece_at(4, 3, PieceName::Captain, &blue());
-            set_crater(&mut b, dx, dy);
+    fn default_craters_fill_the_two_patches_in_the_middle_rows() {
+        let b = Board::new();
+        let patched = [
+            (2, 3), (3, 3), (2, 4), (3, 4),
+            (6, 3), (7, 3), (6, 4), (7, 4),
+        ];
+        for (x, y) in patched {
             assert_eq!(
-                b.move_piece(4, 3, dx, dy, &blue()),
+                b.tiles[[x, y]].tile_type,
+                TilesType::Crater,
+                "({}, {}) must be a crater",
+                x,
+                y
+            );
+        }
+        // The squares between the patches are open, untouched terrain.
+        for (x, y) in [(4, 3), (5, 3), (4, 0), (5, 5), (0, 2)] {
+            assert_eq!(
+                b.tiles[[x, y]].tile_type,
+                TilesType::Empty,
+                "({}, {}) must stay empty",
+                x,
+                y
+            );
+        }
+    }
+
+    #[test]
+    fn default_craters_do_not_affect_army_placement() {
+        let mut b = Board::new();
+        b.initialize(&blue(), &red());
+        let blue_pieces = b
+            .tiles
+            .iter()
+            .filter(|t| t.owned_team == blue().ownership())
+            .count();
+        let red_pieces = b
+            .tiles
+            .iter()
+            .filter(|t| t.owned_team == red().ownership())
+            .count();
+        assert_eq!(blue_pieces, 30, "blue keeps its full army of 30");
+        assert_eq!(red_pieces, 30, "red keeps its full army of 30");
+        // Craters never hold pieces.
+        for (x, y) in [
+            (2, 3), (3, 3), (2, 4), (3, 4),
+            (6, 3), (7, 3), (6, 4), (7, 4),
+        ] {
+            assert!(b.tiles[[x, y]].piece.is_none());
+        }
+    }
+
+    #[test]
+    fn moving_onto_a_default_crater_is_blocked() {
+        // Each pair places the Captain one square away from a default crater.
+        for ((sx, sy), (dx, dy)) in [((5, 4), (6, 4)), ((4, 3), (3, 3))] {
+            let mut b = board_with_piece_at(sx, sy, PieceName::Captain, &blue());
+            assert_eq!(
+                b.move_piece(sx, sy, dx, dy, &blue()),
                 Err(MoveError::Blocked),
                 "crater at ({}, {}) should block the move",
                 dx,
                 dy
             );
-            assert_occupied(&b, 4, 3, PieceName::Captain, &blue());
+            assert_occupied(&b, sx, sy, PieceName::Captain, &blue());
         }
     }
 
     #[test]
+    fn a_scout_slide_is_blocked_by_a_default_crater() {
+        // Row 3 is open except for (2,3), (3,3) and (6,3), (7,3), so a
+        // Scout at (4,3) cannot reach past either patch on that row.
+        let mut b = board_with_piece_at(4, 3, PieceName::Scout, &blue());
+        assert_eq!(
+            b.move_piece(4, 3, 0, 3, &blue()),
+            Err(MoveError::PieceOutOFMoves),
+            "the western patch at (2,3)/(3,3) must stop the slide"
+        );
+        assert_eq!(
+            b.move_piece(4, 3, 9, 3, &blue()),
+            Err(MoveError::PieceOutOFMoves),
+            "the eastern patch at (6,3)/(7,3) must stop the slide"
+        );
+        // Short slides inside the open stretch still work.
+        assert_eq!(
+            b.move_piece(4, 3, 5, 3, &blue()),
+            Ok(MoveOutcome::Moved)
+        );
+        assert_occupied(&b, 5, 3, PieceName::Scout, &blue());
+        assert_empty(&b, 4, 3);
+    }
+
+    #[test]
     fn moving_onto_own_piece_is_blocked() {
-        for (dx, dy) in [(5, 3), (4, 4)] {
+        for (dx, dy) in [(5, 3), (4, 2)] {
             let mut b = board_with_piece_at(4, 3, PieceName::Captain, &blue());
             add_piece(&mut b, dx, dy, PieceName::Scout, &blue());
             assert_eq!(
@@ -664,12 +750,12 @@ fn board_with_piece_at(x: usize, y: usize, id: PieceName, team: &Team) -> Board 
 
     #[test]
     fn scout_captures_an_enemy_far_away() {
-        let mut b = board_with_piece_at(4, 3, PieceName::Scout, &blue());
-        add_piece(&mut b, 9, 3, PieceName::Flag, &red());
+        let mut b = board_with_piece_at(4, 5, PieceName::Scout, &blue());
+        add_piece(&mut b, 9, 5, PieceName::Flag, &red());
 
-        assert_eq!(b.move_piece(4, 3, 9, 3, &blue()), Ok(MoveOutcome::Captured));
-        assert_occupied(&b, 9, 3, PieceName::Scout, &blue());
-        assert_empty(&b, 4, 3);
+        assert_eq!(b.move_piece(4, 5, 9, 5, &blue()), Ok(MoveOutcome::Captured));
+        assert_occupied(&b, 9, 5, PieceName::Scout, &blue());
+        assert_empty(&b, 4, 5);
     }
 
     #[test]
