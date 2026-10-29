@@ -4,6 +4,8 @@ use crate::team::{Team, TeamColor};
 pub mod board;
 pub mod piece;
 pub mod team;
+pub mod pos;
+pub mod game;
 mod error;
 
 fn main() {
