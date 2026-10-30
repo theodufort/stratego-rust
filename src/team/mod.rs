@@ -1,14 +1,14 @@
 use crate::board::TilePieceOwnership;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TeamColor{
+pub enum TeamColor {
     Red,
-    Blue
+    Blue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Team{
-    color: TeamColor
+pub struct Team {
+    color: TeamColor,
 }
 
 impl Team {
@@ -26,7 +26,7 @@ impl Team {
     pub fn ownership(&self) -> TilePieceOwnership {
         match self.color {
             TeamColor::Blue => TilePieceOwnership::Team1,
-            TeamColor::Red  => TilePieceOwnership::Team2,
+            TeamColor::Red => TilePieceOwnership::Team2,
         }
     }
 }

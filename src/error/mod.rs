@@ -4,5 +4,5 @@ pub enum MoveError {
     NotYourPiece,
     OutOfBounds,
     Blocked,
-    PieceOutOFMoves
+    PieceOutOFMoves,
 }
