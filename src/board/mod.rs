@@ -152,11 +152,26 @@ impl Board {
         }
     }
 
+    /// Label shown for a crater square. Longer than `·` so a crater can be
+    /// told apart from an empty tile at a glance.
+    const CRATER_LABEL: &'static str = "crater";
+
+    fn cell_label(&self, tile: &Tile) -> String {
+        if matches!(tile.tile_type, TilesType::Crater) {
+            Self::CRATER_LABEL.to_string()
+        } else {
+            match &tile.piece {
+                Some(piece) => piece.id.to_string(),
+                None => "·".to_string(),
+            }
+        }
+    }
+
     pub fn print_board(&self) {
         let col_widths: Vec<usize> = (0..self.dim_x)
             .map(|x| {
                 (0..self.dim_y)
-                    .map(|y| self.tiles[[x, y]].piece.as_ref().map_or(1, |p| p.id.to_string().len()))
+                    .map(|y| self.cell_label(&self.tiles[[x, y]]).len())
                     .max()
                     .unwrap_or(1)
                     .max(4)
@@ -184,11 +199,7 @@ impl Board {
         for y in 0..self.dim_y {
             print!("{:>4} |", y);
             for (x, &w) in col_widths.iter().enumerate() {
-                let cell = &self.tiles[[x, y]];
-                let s = match &cell.piece {
-                    Some(piece) => piece.id.to_string(),
-                    None => "·".to_string(),
-                };
+                let s = self.cell_label(&self.tiles[[x, y]]);
                 print!("{} |", pad(&s, w));
             }
             println!();
